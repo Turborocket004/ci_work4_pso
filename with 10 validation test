@@ -3,13 +3,13 @@ import numpy as np
 import random
 import matplotlib.pyplot as plt
 
-# Load the Excel file using pandas
+# Load the dataset
 data = pd.read_excel("AirQualityUCI.xlsx")
 
-# Preprocess data: Replace -200 with NaN and drop rows with NaN
+# Preprocess data: Replace -200 with NaN, then drop rows with NaN values
 data = data.replace(-200, np.nan).dropna()
 
-# Select input features and target as specified
+# Select input features and target
 input_features = data.iloc[:, [3, 6, 8, 10, 11, 12, 13, 14]].values
 target = data.iloc[:, 5].values
 
@@ -20,6 +20,14 @@ def normalize_features(X):
     return (X - min_vals) / (max_vals - min_vals)
 
 input_features = normalize_features(input_features)
+
+# Create shifted targets for multi-day prediction (5-day and 10-day ahead)
+target_5day = np.roll(target, -5)[:-5]
+target_10day = np.roll(target, -10)[:-10]
+
+# Truncate input features to match shifted targets
+input_features_5day = input_features[:-5]
+input_features_10day = input_features[:-10]
 
 # Define MLP class
 class MLP:
@@ -39,7 +47,7 @@ class MLP:
         return x
 
     def sigmoid(self, x):
-        x = np.clip(x, -500, 500)  # Clip the values to avoid overflow
+        x = np.clip(x, -500, 500)
         return 1 / (1 + np.exp(-x))
 
     def calculate_mae(self, predictions, targets):
@@ -47,7 +55,7 @@ class MLP:
 
 # PSO parameters
 n_particles = 30
-n_iterations = 100
+n_iterations = 10  # Reduced iterations for faster execution
 c1, c2 = 1.5, 1.5
 w = 0.5
 
@@ -71,7 +79,7 @@ def particle_swarm_optimization(mlp, X_train, y_train):
                 layer['weights'] = layer_weights_bias[:layer['weights'].size].reshape(layer['weights'].shape)
                 layer['bias'] = layer_weights_bias[layer['weights'].size:]
                 index += layer_size
-            
+
             predictions = np.array([mlp.forward(x) for x in X_train]).flatten()
             error = mlp.calculate_mae(predictions, y_train)
 
@@ -82,6 +90,8 @@ def particle_swarm_optimization(mlp, X_train, y_train):
                 g_best_score = error
                 g_best_position = particles[i]
 
+        print(f"Iteration {iteration + 1}/{n_iterations}, Best Error: {g_best_score}")
+
         for i in range(n_particles):
             r1, r2 = np.random.rand(), np.random.rand()
             velocities[i] = (w * velocities[i]
@@ -91,52 +101,62 @@ def particle_swarm_optimization(mlp, X_train, y_train):
     
     return g_best_position
 
-# 10-Fold Cross-Validation
-n_folds = 10
-fold_size = len(input_features) // n_folds
-mae_scores = []
+# Experiment with single hidden layer configurations
+hidden_layer_configs = [[10], [20], [30]]  # Single hidden layer configurations
+results = {"5_day": [], "10_day": []}
 
-indices = np.arange(len(input_features))
-np.random.shuffle(indices)  # Shuffle indices for random fold selection
+for config in hidden_layer_configs:
+    print(f"\nTesting hidden layer configuration: {config}")
 
-for fold in range(n_folds):
-    # Define the test and training indices
-    test_indices = indices[fold * fold_size:(fold + 1) * fold_size]
-    train_indices = np.concatenate((indices[:fold * fold_size], indices[(fold + 1) * fold_size:]))
+    # Set up for 5-day and 10-day predictions with 10-fold CV
+    for horizon, (X, y) in zip(["5_day", "10_day"], [(input_features_5day, target_5day), (input_features_10day, target_10day)]):
+        n_folds = 10
+        fold_size = len(X) // n_folds
+        mae_scores = []
 
-    X_train, X_test = input_features[train_indices], input_features[test_indices]
-    y_train, y_test = target[train_indices], target[test_indices]
+        indices = np.arange(len(X))
+        np.random.shuffle(indices)
 
-    # Train and evaluate the MLP with PSO
-    mlp_model = MLP(input_size=8, hidden_layers=[10, 10], output_size=1)
-    best_weights = particle_swarm_optimization(mlp_model, X_train, y_train)
+        for fold in range(n_folds):
+            print(f"\nHorizon: {horizon}, Fold: {fold + 1}/{n_folds}")
 
-    # Apply best weights to the model
-    index = 0
-    for layer in mlp_model.layers:
-        layer_size = layer['weights'].size + layer['bias'].size
-        layer_weights_bias = best_weights[index:index+layer_size]
-        layer['weights'] = layer_weights_bias[:layer['weights'].size].reshape(layer['weights'].shape)
-        layer['bias'] = layer_weights_bias[layer['weights'].size:]
-        index += layer_size
+            test_indices = indices[fold * fold_size:(fold + 1) * fold_size]
+            train_indices = np.concatenate((indices[:fold * fold_size], indices[(fold + 1) * fold_size:]))
 
-    # Predict and calculate MAE for validation
-    predictions = np.array([mlp_model.forward(x) for x in X_test]).flatten()
-    mae = mlp_model.calculate_mae(predictions, y_test)
-    mae_scores.append(mae)
-    print(f"Fold {fold + 1} - Mean Absolute Error (MAE): {mae}")
+            X_train, X_test = X[train_indices], X[test_indices]
+            y_train, y_test = y[train_indices], y[test_indices]
 
-# Calculate average MAE across all folds
-average_mae = np.mean(mae_scores)
-print(f"Average Mean Absolute Error (MAE) across 10 folds: {average_mae}")
+            # Train and evaluate the MLP with PSO
+            mlp_model = MLP(input_size=8, hidden_layers=config, output_size=1)
+            best_weights = particle_swarm_optimization(mlp_model, X_train, y_train)
 
-# Optional: You can visualize the MAE scores for each fold
+            # Apply best weights to the model
+            index = 0
+            for layer in mlp_model.layers:
+                layer_size = layer['weights'].size + layer['bias'].size
+                layer_weights_bias = best_weights[index:index+layer_size]
+                layer['weights'] = layer_weights_bias[:layer['weights'].size].reshape(layer['weights'].shape)
+                layer['bias'] = layer_weights_bias[layer['weights'].size:]
+                index += layer_size
+
+            # Predict and calculate MAE for validation
+            predictions = np.array([mlp_model.forward(x) for x in X_test]).flatten()
+            mae = mlp_model.calculate_mae(predictions, y_test)
+            mae_scores.append(mae)
+            print(f"Fold {fold + 1} - Mean Absolute Error (MAE): {mae}")
+
+        average_mae = np.mean(mae_scores)
+        results[horizon].append((config, average_mae))
+        print(f"{horizon} - Hidden layers {config} - Average MAE: {average_mae}")
+
+# Plot the results for different configurations
 plt.figure(figsize=(10, 5))
-plt.plot(range(1, n_folds + 1), mae_scores, marker='o', label='MAE per fold')
-plt.axhline(average_mae, color='red', linestyle='--', label='Average MAE')
-plt.xlabel("Fold")
+for horizon, result in results.items():
+    x_labels = [str(config) for config, _ in result]
+    mae_values = [mae for _, mae in result]
+    plt.plot(x_labels, mae_values, marker='o', label=f'{horizon} prediction')
+plt.xlabel("Hidden Layer Configuration")
 plt.ylabel("Mean Absolute Error (MAE)")
-plt.title("MAE across 10 Folds")
-plt.xticks(range(1, n_folds + 1))
+plt.title("MAE for Different Hidden Layer Configurations")
 plt.legend()
 plt.show()
